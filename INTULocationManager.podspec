@@ -1,10 +1,10 @@
 Pod::Spec.new do |s|
   s.name                  = "INTULocationManager"
-  s.version               = "4.4.0"
-  s.homepage              = "https://github.com/intuit/LocationManager"
+  s.version               = "1.0.0"
+  s.homepage              = "https://github.com/WJustin/LocationManager"
   s.license               = 'MIT'
   s.author                = { "Lucien Dupont" => "lucien@chromedomesoftware.com" }
-  s.source                = { :git => "https://github.com/intuit/LocationManager.git", :tag => "v4.4.0" }
+  s.source                = { :git => "https://github.com/WJustin/LocationManager.git", :tag => "v1.1.0" }
   s.source_files          = 'LocationManager/INTULocationManager'
   s.platform              = :ios
   s.ios.deployment_target = '12.0'

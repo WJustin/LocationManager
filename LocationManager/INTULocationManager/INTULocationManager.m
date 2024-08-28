@@ -69,6 +69,8 @@
 // @[ INTUHeadingRequest *headingRequest1, INTUHeadingRequest *headingRequest2, ... ]
 @property (nonatomic, strong) __INTU_GENERICS(NSArray, INTUHeadingRequest *) *headingRequests;
 
+@property (nonatomic, strong) dispatch_queue_t queue;
+
 @end
 
 
@@ -126,6 +128,7 @@ static id _sharedInstance;
     NSAssert(_sharedInstance == nil, @"Only one instance of INTULocationManager should be created. Use +[INTULocationManager sharedInstance] instead.");
     self = [super init];
     if (self) {
+        _queue = dispatch_queue_create("com.intu.location.serial", DISPATCH_QUEUE_SERIAL);
         _locationManager = [[CLLocationManager alloc] init];
         _locationManager.delegate = self;
         self.preferredAuthorizationType = INTUAuthorizationTypeAuto;
@@ -445,46 +448,50 @@ static id _sharedInstance;
  */
 - (void)addLocationRequest:(INTULocationRequest *)locationRequest
 {
-    INTULocationServicesState locationServicesState = [INTULocationManager locationServicesState];
-    if (locationServicesState == INTULocationServicesStateDisabled ||
-        locationServicesState == INTULocationServicesStateDenied ||
-        locationServicesState == INTULocationServicesStateRestricted) {
-        // No need to add this location request, because location services are turned off device-wide, or the user has denied this app permissions to use them
-        [self completeLocationRequest:locationRequest];
-        return;
-    }
-
-    switch (locationRequest.type) {
-        case INTULocationRequestTypeSingle:
-        case INTULocationRequestTypeSubscription:
-        {
-            INTULocationAccuracy maximumDesiredAccuracy = INTULocationAccuracyNone;
-            // Determine the maximum desired accuracy for all existing location requests (does not include the new request we're currently adding)
-            for (INTULocationRequest *locationRequest in [self activeLocationRequestsExcludingType:INTULocationRequestTypeSignificantChanges]) {
-                if (locationRequest.desiredAccuracy > maximumDesiredAccuracy) {
-                    maximumDesiredAccuracy = locationRequest.desiredAccuracy;
-                }
+    dispatch_async(self.queue, ^{
+        INTULocationServicesState locationServicesState = [INTULocationManager locationServicesState];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (locationServicesState == INTULocationServicesStateDisabled ||
+                locationServicesState == INTULocationServicesStateDenied ||
+                locationServicesState == INTULocationServicesStateRestricted) {
+                // No need to add this location request, because location services are turned off device-wide, or the user has denied this app permissions to use them
+                [self completeLocationRequest:locationRequest];
+                return;
             }
-            // Take the max of the maximum desired accuracy for all existing location requests and the desired accuracy of the new request we're currently adding
-            maximumDesiredAccuracy = MAX(locationRequest.desiredAccuracy, maximumDesiredAccuracy);
-            [self updateWithMaximumDesiredAccuracy:maximumDesiredAccuracy];
-            [self updateWithDesiredActivityType:locationRequest.desiredActivityType];
 
-            [self startUpdatingLocationIfNeeded];
-        }
-            break;
-        case INTULocationRequestTypeSignificantChanges:
-            [self startMonitoringSignificantLocationChangesIfNeeded];
-            break;
-    }
-    __INTU_GENERICS(NSMutableArray, INTULocationRequest *) *newLocationRequests = [NSMutableArray arrayWithArray:self.locationRequests];
-    [newLocationRequests addObject:locationRequest];
-    self.locationRequests = newLocationRequests;
-    INTULMLog(@"Location Request added with ID: %ld", (long)locationRequest.requestID);
+            switch (locationRequest.type) {
+                case INTULocationRequestTypeSingle:
+                case INTULocationRequestTypeSubscription:
+                {
+                    INTULocationAccuracy maximumDesiredAccuracy = INTULocationAccuracyNone;
+                    // Determine the maximum desired accuracy for all existing location requests (does not include the new request we're currently adding)
+                    for (INTULocationRequest *locationRequest in [self activeLocationRequestsExcludingType:INTULocationRequestTypeSignificantChanges]) {
+                        if (locationRequest.desiredAccuracy > maximumDesiredAccuracy) {
+                            maximumDesiredAccuracy = locationRequest.desiredAccuracy;
+                        }
+                    }
+                    // Take the max of the maximum desired accuracy for all existing location requests and the desired accuracy of the new request we're currently adding
+                    maximumDesiredAccuracy = MAX(locationRequest.desiredAccuracy, maximumDesiredAccuracy);
+                    [self updateWithMaximumDesiredAccuracy:maximumDesiredAccuracy];
+                    [self updateWithDesiredActivityType:locationRequest.desiredActivityType];
 
-    // Process all location requests now, as we may be able to immediately complete the request just added above
-    // if a location update was recently received (stored in self.currentLocation) that satisfies its criteria.
-    [self processLocationRequests];
+                    [self startUpdatingLocationIfNeeded];
+                }
+                    break;
+                case INTULocationRequestTypeSignificantChanges:
+                    [self startMonitoringSignificantLocationChangesIfNeeded];
+                    break;
+            }
+            __INTU_GENERICS(NSMutableArray, INTULocationRequest *) *newLocationRequests = [NSMutableArray arrayWithArray:self.locationRequests];
+            [newLocationRequests addObject:locationRequest];
+            self.locationRequests = newLocationRequests;
+            INTULMLog(@"Location Request added with ID: %ld", (long)locationRequest.requestID);
+
+            // Process all location requests now, as we may be able to immediately complete the request just added above
+            // if a location update was recently received (stored in self.currentLocation) that satisfies its criteria.
+            [self processLocationRequests];
+        });
+    });
 }
 
 /**
@@ -789,20 +796,20 @@ static id _sharedInstance;
     [locationRequest complete];
     [self removeLocationRequest:locationRequest];
 
-    INTULocationStatus status = [self statusForLocationRequest:locationRequest];
-    CLLocation *currentLocation = self.currentLocation;
-    INTULocationAccuracy achievedAccuracy = [self achievedAccuracyForLocation:currentLocation];
-
-    // INTULocationManager is not thread safe and should only be called from the main thread, so we should already be executing on the main thread now.
-    // dispatch_async is used to ensure that the completion block for a request is not executed before the request ID is returned, for example in the
-    // case where the user has denied permission to access location services and the request is immediately completed with the appropriate error.
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if (locationRequest.block) {
-            locationRequest.block(currentLocation, achievedAccuracy, status);
-        }
+    dispatch_async(self.queue, ^{
+        INTULocationStatus status = [self statusForLocationRequest:locationRequest];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            CLLocation *currentLocation = self.currentLocation;
+            INTULocationAccuracy achievedAccuracy = [self achievedAccuracyForLocation:currentLocation];
+            // INTULocationManager is not thread safe and should only be called from the main thread, so we should already be executing on the main thread now.
+            // dispatch_async is used to ensure that the completion block for a request is not executed before the request ID is returned, for example in the
+            // case where the user has denied permission to access location services and the request is immediately completed with the appropriate error.
+            if (locationRequest.block) {
+                locationRequest.block(currentLocation, achievedAccuracy, status);
+            }
+            INTULMLog(@"Location Request completed with ID: %ld, currentLocation: %@, achievedAccuracy: %lu, status: %lu", (long)locationRequest.requestID, currentLocation, (unsigned long) achievedAccuracy, (unsigned long)status);
+        });
     });
-
-    INTULMLog(@"Location Request completed with ID: %ld, currentLocation: %@, achievedAccuracy: %lu, status: %lu", (long)locationRequest.requestID, currentLocation, (unsigned long) achievedAccuracy, (unsigned long)status);
 }
 
 /**
@@ -812,16 +819,18 @@ static id _sharedInstance;
 {
     NSAssert(locationRequest.isRecurring, @"This method should only be called for recurring location requests.");
 
-    INTULocationStatus status = [self statusForLocationRequest:locationRequest];
-    CLLocation *currentLocation = self.currentLocation;
-    INTULocationAccuracy achievedAccuracy = [self achievedAccuracyForLocation:currentLocation];
-
-    // INTULocationManager is not thread safe and should only be called from the main thread, so we should already be executing on the main thread now.
-    // dispatch_async is used to ensure that the completion block for a request is not executed before the request ID is returned.
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if (locationRequest.block) {
-            locationRequest.block(currentLocation, achievedAccuracy, status);
-        }
+    dispatch_async(self.queue, ^{
+        INTULocationStatus status = [self statusForLocationRequest:locationRequest];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            CLLocation *currentLocation = self.currentLocation;
+            INTULocationAccuracy achievedAccuracy = [self achievedAccuracyForLocation:currentLocation];
+            
+            // INTULocationManager is not thread safe and should only be called from the main thread, so we should already be executing on the main thread now.
+            // dispatch_async is used to ensure that the completion block for a request is not executed before the request ID is returned.
+            if (locationRequest.block) {
+                locationRequest.block(currentLocation, achievedAccuracy, status);
+            }
+        });
     });
 }
 
